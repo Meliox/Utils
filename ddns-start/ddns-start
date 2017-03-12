@@ -1,0 +1,100 @@
+#!/bin/sh
+# Custom DDNS (dynamic DNS) for the no-ip.com service for asuswrt-merlin
+# The scripts works in a double NAT setup and single NAT setup, and will automatically detect the configuration
+VERSION="2.4"
+USERNAME=""
+PASSWORD=""
+HOSTNAME=""
+USERAGENT="asuswrt-merlin No-IP Updater/$version"
+ASUSIP="$(nvram get wan0_ipaddr)" # $1 could have been used, but doesn't work in cron mode, so we get the the reported wan_ipaddr from nvram instead. (dual wan uses wan_ipaddr_x, not supported)
+LOGFILE="" # leave empty if not used
+CUSTOM_UPDATE="" # use cron to check for new ip every X minute. Leave empty if you're using the default from merlin (24 hours). Any previous, or if used, setting will be removed if left empty.
+## CODE BELOW ####
+LogMe(){
+    if [[ -n "$LOGFILE" ]]; then
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')]: $1" >> "$LOGFILE"
+    fi
+    logger "$1"
+}
+UpdateMerlin(){
+    /sbin/ddns_custom_updated "$1"
+}
+UpdateIp(){
+    # update ip
+    nvram set EXTERNALIP="$NEWIP"
+    URL="https://$USERNAME:$PASSWORD@dynupdate.no-ip.com/nic/update?hostname=$HOSTNAME&myip=$NEWIP"
+    RESPONSE=$(curl -s -k --user-agent "$USERAGENT" "$URL")
+    RESPONSE_A=$(echo $RESPONSE | awk '{ print $1 }')
+    case "$RESPONSE_A" in
+        "good")    UpdateMerlin 1; LogMe "CustomUpdateDDNS: (good) DNS hostname(s) successfully updated to $NEWIP."
+        ;;
+        "nochg") UpdateMerlin 1; LogMe "CustomUpdateDDNS: (nochg) IP address is current: $NEWIP; no update performed."
+        ;;
+        "nohost") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (nohost) Hostname supplied does not exist under specified account. Revise config file."
+        ;;
+        "badauth") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (badauth) Invalid username password combination."
+        ;;
+        "badagent")    UpdateMerlin 0;    LogMe "CustomUpdateDDNS: (badagent) Client disabled - No-IP is no longer allowing requests from this update script."
+        ;;
+        "!donator")    UpdateMerlin 0;    LogMe "CustomUpdateDDNS: (!donator) An update request was sent including a feature that is not available."
+        ;;
+        "abuse") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (abuse) Username is blocked due to abuse."
+        ;;
+        "911") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (911) A fatal error on our side such as a database outage. Retry the update in no sooner than 30 minutes."
+        ;;
+        "*") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (error) Could not understand the response from No-IP. The DNS update server may be down."
+        ;;
+    esac
+}
+CronUpdate(){
+    if [[ -n "$CUSTOM_UPDATE" ]]; then
+        if [[ -z "$(cru l | grep "CustomUpdateDDNS")" ]]; then
+            /usr/sbin/cru a CustomUpdateDDNS "*/$CUSTOM_UPDATE * * * * /jffs/scripts/ddns-start"
+            LogMe "CustomUpdateDDNS has been added to cron (x $CUSTOM_UPDATE mins)"
+        fi
+    else
+        if [[ -n "$(cru l | grep "CustomUpdateDDNS")" ]]; then
+            /usr/sbin/cru d "CustomUpdateDDNS"
+            LogMe "CustomUpdateDDNS has been removed from cron"
+        fi
+    fi
+}
+
+LogMe "CustomUpdateDDNS: Starting custom DDNS updater v$VERSION"
+
+if [[ -z "$ASUSIP" ]]; then
+    LogMe "(error) Router has no ip or no network configuration"
+    exit 1
+fi
+
+CronUpdate
+
+LogMe "CustomUpdateDDNS: Reported asus router ip: $ASUSIP"
+
+if [[ -n "$(echo "$ASUSIP" | grep -E '^(10\.|100\.(6[4-9]|7[0-9]|8[0-9]|9[0-9]|1[0-2][0-9])\.|172\.(1[6789]|2[0-9]|3[01])\.|192\.0\.0\.|192\.168|198\.1[89])')" ]]; then
+    # check if we have a local ip. If true, then look up external ip
+    LogMe "CustomUpdateDDNS: Local ip detected"
+    # look up external ip
+    NEWIP=$(curl -s http://icanhazip.com/)
+    # backup ipcheck if first one fails
+    if [[ -z "$NEWIP" ]]; then
+        NEWIP=$(curl -s http://ipv4.myip.dk/api/info/IPv4Address | cut -d "\"" -f2)
+    fi
+    LogMe "CustomUpdateDDNS: Found external ip: $NEWIP"
+else
+    NEWIP="$ASUSIP"
+    LogMe "CustomUpdateDDNS: External ip detected"
+fi
+
+# compare found ip with stored ip. If nothing is stored, assume an update is needed
+
+if [[ "$NEWIP" == "$(nvram get EXTERNALIP)" ]]; then
+    # ip has not changed there's no need to hammer the ddns provider, so compare it to the previosuly found ip and save in ram
+    LogMe "CustomUpdateDDNS: (nochange) External IP address is current: $NEWIP"
+    LogMe "CustomUpdateDDNS: Update not needed"
+    /sbin/ddns_custom_updated 1
+else
+    UpdateIp
+fi
+LogMe "CustomUpdateDDNS: DDNS update complete"
+exit 0
