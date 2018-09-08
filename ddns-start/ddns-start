@@ -1,56 +1,102 @@
 #!/bin/sh
-# Custom DDNS (dynamic DNS) for the no-ip.com service for asuswrt-merlin
-# The scripts works in a double NAT setup and single NAT setup, and will automatically detect the configuration
-VERSION="2.4"
+# Custom DDNS (dynamic DNS) for the no-ip.com or asuswrt service for asuswrt-merlin
+# The scripts works in a double NAT setup and single NAT setup, and will automatically detect the current configuration.
+# The script does only support single wan configuration, e.g. not dual.
+
+#Path to logfile leave empty if not used
+LOGFILE=""
+
+#Use cron to check for new ip every X minute.
+#Leave empty if you're using the default from merlin (24 hours).
+#Any previous, or if used, setting will be removed if left empty.
+CUSTOM_UPDATE_INTERVAL="" 
+SILENT="false" # "true|false". true only logs ip change
+
+#Select DDNS provider below. Select either and adjust config accordingly
+DDNS_PROVIDER="noip" # "noip" or "asuswrt"
+
+###Config for noip
 USERNAME=""
 PASSWORD=""
 HOSTNAME=""
-USERAGENT="asuswrt-merlin No-IP Updater/$version"
-ASUSIP="$(nvram get wan0_ipaddr)" # $1 could have been used, but doesn't work in cron mode, so we get the the reported wan_ipaddr from nvram instead. (dual wan uses wan_ipaddr_x, not supported)
-LOGFILE="" # leave empty if not used
-CUSTOM_UPDATE="" # use cron to check for new ip every X minute. Leave empty if you're using the default from merlin (24 hours). Any previous, or if used, setting will be removed if left empty.
+USERAGENT="asuswrt-merlin No-IP Updater/$VERSION"
+
+###Config for asuswrt
+MY_DDNS_HOSTNAME="[your-hostname].asuscomm.com"
+
+#Select IP Service Provider below.
+IP_PROVIDER="wget -O - --no-check-certificate --quiet https://checkip.amazonaws.com/"
+#IP_PROVIDER="curl -s http://icanhazip.com/"
+#IP_PROVIDER="curl -s http://ipv4.myip.dk/api/info/IPv4Address | cut -d "\"" -f2"
+
 ## CODE BELOW ####
+VERSION="3.0"
+# Get the the reported wan_ipaddr from nvram. (dual wan uses wan_ipaddr_x, not supported)
+ASUSIP="$(nvram get wan0_ipaddr)" 
+
 LogMe(){
     if [[ -n "$LOGFILE" ]]; then
         echo "[$(date +'%Y-%m-%d %H:%M:%S')]: $1" >> "$LOGFILE"
     fi
-    logger "$1"
+	if [[ "$SILENT" == "true" ]]; then
+		if [[ -n "$2" ]]; then
+			logger "$1"
+		fi
+	else
+		logger "$1"
+	fi
 }
 UpdateMerlin(){
     /sbin/ddns_custom_updated "$1"
 }
 UpdateIp(){
-    # update ip
-    nvram set EXTERNALIP="$NEWIP"
-    URL="https://$USERNAME:$PASSWORD@dynupdate.no-ip.com/nic/update?hostname=$HOSTNAME&myip=$NEWIP"
-    RESPONSE=$(curl -s -k --user-agent "$USERAGENT" "$URL")
-    RESPONSE_A=$(echo $RESPONSE | awk '{ print $1 }')
-    case "$RESPONSE_A" in
-        "good")    UpdateMerlin 1; LogMe "CustomUpdateDDNS: (good) DNS hostname(s) successfully updated to $NEWIP."
-        ;;
-        "nochg") UpdateMerlin 1; LogMe "CustomUpdateDDNS: (nochg) IP address is current: $NEWIP; no update performed."
-        ;;
-        "nohost") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (nohost) Hostname supplied does not exist under specified account. Revise config file."
-        ;;
-        "badauth") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (badauth) Invalid username password combination."
-        ;;
-        "badagent")    UpdateMerlin 0;    LogMe "CustomUpdateDDNS: (badagent) Client disabled - No-IP is no longer allowing requests from this update script."
-        ;;
-        "!donator")    UpdateMerlin 0;    LogMe "CustomUpdateDDNS: (!donator) An update request was sent including a feature that is not available."
-        ;;
-        "abuse") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (abuse) Username is blocked due to abuse."
-        ;;
-        "911") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (911) A fatal error on our side such as a database outage. Retry the update in no sooner than 30 minutes."
-        ;;
-        "*") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (error) Could not understand the response from No-IP. The DNS update server may be down."
-        ;;
-    esac
+	nvram set EXTERNALIP="$NEWIP"
+	case "$DDNS_PROVIDER" in
+		"noip" )
+			# update ip
+			URL="https://$USERNAME:$PASSWORD@dynupdate.no-ip.com/nic/update?hostname=$HOSTNAME&myip=$NEWIP"
+			RESPONSE=$(curl -s -k --user-agent "$USERAGENT" "$URL")
+			RESPONSE_A=$(echo $RESPONSE | awk '{ print $1 }')
+			case "$RESPONSE_A" in
+				"good")    UpdateMerlin 1; LogMe "CustomUpdateDDNS: (good) DNS hostname successfully updated to $NEWIP." "log"
+				;;
+				"nochg") UpdateMerlin 1; LogMe "CustomUpdateDDNS: (nochg) IP address is current: $NEWIP; no update performed."
+				;;
+				"nohost") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (nohost) Hostname supplied does not exist under specified account. Revise config file."
+				;;
+				"badauth") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (badauth) Invalid username password combination."
+				;;
+				"badagent")    UpdateMerlin 0; LogMe "CustomUpdateDDNS: (badagent) Client disabled - No-IP is no longer allowing requests from this update script."
+				;;
+				"!donator")    UpdateMerlin 0; LogMe "CustomUpdateDDNS: (!donator) An update request was sent including a feature that is not available."
+				;;
+				"abuse") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (abuse) Username is blocked due to abuse."
+				;;
+				"911") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (911) A fatal error on our side such as a database outage. Retry the update in no sooner than 30 minutes."
+				;;
+				"*") UpdateMerlin 0; LogMe "CustomUpdateDDNS: (error) Could not understand the response from No-IP. The DNS update server may be down."
+				;;
+			esac
+		;;
+		"asuswrt" )
+			RESPONSE=$(nslookup $MY_DDNS_HOSTNAME ns1.asuscomm.com | tail -n1 | sed -e 's/Address 1: //')
+			if [[ -n "$RESPONSE" ]]; then
+				UPDATE_DDNS="ez-ipupdate -S dyndns -i eth0 -a $NEWIP -h $MY_DDNS_HOSTNAME -A 2 -s nwsrv-ns1.asus.com"
+				UpdateMerlin 1
+				LogMe "CustomUpdateDDNS: DNS hostname successfully updated to $NEWIP." "log"
+			else
+				LogMe "CustomUpdateDDNS: Something went wrong????"
+			fi
+		;;
+	esac
 }
+
+
 CronUpdate(){
-    if [[ -n "$CUSTOM_UPDATE" ]]; then
+    if [[ -n "$CUSTOM_UPDATE_INTERVAL" ]]; then
         if [[ -z "$(cru l | grep "CustomUpdateDDNS")" ]]; then
-            /usr/sbin/cru a CustomUpdateDDNS "*/$CUSTOM_UPDATE * * * * /jffs/scripts/ddns-start"
-            LogMe "CustomUpdateDDNS has been added to cron (x $CUSTOM_UPDATE mins)"
+            /usr/sbin/cru a CustomUpdateDDNS "*/$CUSTOM_UPDATE_INTERVAL * * * * /jffs/scripts/ddns-start"
+            LogMe "CustomUpdateDDNS has been added to cron (x $CUSTOM_UPDATE_INTERVAL mins)"
         fi
     else
         if [[ -n "$(cru l | grep "CustomUpdateDDNS")" ]]; then
@@ -75,12 +121,12 @@ if [[ -n "$(echo "$ASUSIP" | grep -E '^(10\.|100\.(6[4-9]|7[0-9]|8[0-9]|9[0-9]|1
     # check if we have a local ip. If true, then look up external ip
     LogMe "CustomUpdateDDNS: Local ip detected"
     # look up external ip
-    NEWIP=$(curl -s http://icanhazip.com/)
-    # backup ipcheck if first one fails
-    if [[ -z "$NEWIP" ]]; then
-        NEWIP=$(curl -s http://ipv4.myip.dk/api/info/IPv4Address | cut -d "\"" -f2)
-    fi
-    LogMe "CustomUpdateDDNS: Found external ip: $NEWIP"
+	NEWIP=$(eval $IP_PROVIDER)
+	if [[ -n "$NEWIP" ]]; then
+		LogMe "CustomUpdateDDNS: Found external ip: $NEWIP"
+	else
+		LogMe "CustomUpdateDDNS: External IP not found"
+	fi
 else
     NEWIP="$ASUSIP"
     LogMe "CustomUpdateDDNS: External ip detected"
